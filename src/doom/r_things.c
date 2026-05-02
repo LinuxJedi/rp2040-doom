@@ -737,7 +737,7 @@ void R_ProjectSprite(mobj_t *thing) {
 #endif
     vis->mobjflags = thing->flags;
     vis->scale = xscale << detailshift;
-#if !DOOM_TINY
+#if !DOOM_TINY || !NO_DRAWSEGS
     vis->gx = thing->xy.x;
     vis->gy = thing->xy.y;
     vis->gz = thing->z;
@@ -1161,7 +1161,7 @@ void R_DrawMasked(void) {
 // R_DrawSprite
 //
 void R_DrawSpriteEarly(vissprite_t *spr) {
-#if PICO_DOOM
+#if PICO_DOOM && NO_VISSPRITES
     pd_flag |= 1;
 #if !NO_MASKED_FLOOR_CLIP
     mfloorclip = floorclip;

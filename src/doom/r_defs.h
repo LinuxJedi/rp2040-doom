@@ -458,10 +458,10 @@ typedef struct vissprite_s
     int			x1;
     int			x2;
 
-#if !DOOM_TINY
+#if !DOOM_TINY || !NO_DRAWSEGS
     // for line side calculation
     fixed_t		gx;
-    fixed_t		gy;		
+    fixed_t		gy;
 
     // global bottom / top for silhouette clipping
     fixed_t		gz;

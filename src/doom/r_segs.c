@@ -115,8 +115,27 @@ short *maskedtexturecol;
 //
 // R_RenderMaskedSegRange
 //
+// Stubbed for the wolfDemo port: the upstream Chocolate Doom body relies
+// on direct field access (`curline->frontsector`, `curline->sidedef`,
+// `curline->linedef`, plus the upstream `texturetranslation` /
+// `textureheight` arrays and the upstream `R_GetColumn(int)` /
+// `R_DrawMaskedColumn(column_t*)` signatures) that are incompatible with
+// our SHRINK_MOBJ / USE_RAW_MAPSEG / WHD framedrawable accessors. The
+// drawseg silhouette work that R_DrawSprite needs (in r_things.c) is
+// independent of this function - silhouettes are stored by
+// R_StoreWallRange (further down in this file). Re-enabling this
+// function would let masked mid-textures render (door bars, fences);
+// currently those won't appear. Not on the critical path for Phase 7e.
 void
 R_RenderMaskedSegRange
+        (drawseg_t *ds,
+         int x1,
+         int x2) {
+    (void)ds; (void)x1; (void)x2;
+}
+#if 0
+void
+R_RenderMaskedSegRange_upstream
         (drawseg_t *ds,
          int x1,
          int x2) {
@@ -219,7 +238,8 @@ R_RenderMaskedSegRange
     }
 
 }
-#endif
+#endif // 0
+#endif // !NO_DRAWSEGS
 
 
 
