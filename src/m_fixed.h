@@ -64,7 +64,21 @@ static inline fixed_t FixedMulInline(fixed_t a, fixed_t b) {
 #endif
 }
 #endif
+
+#if defined(__ARM_ARCH_8M_MAIN__) && !PICO_BUILD
+/* Cortex-M33: GCC lowers the int64 multiply to a single SMULL; inlining
+ * eliminates the BL/BX and lets the surrounding code share registers
+ * with operands. Hot for pd_add_plane_column's per-pixel loop. */
+#include <stdint.h>
+static inline fixed_t FixedMul(fixed_t a, fixed_t b) {
+    return (fixed_t)(((int64_t)a * (int64_t)b) >> FRACBITS);
+}
+#define FIXED_MUL_INLINED 1
+#endif
+
+#ifndef FIXED_MUL_INLINED
 fixed_t FixedMul	(fixed_t a, fixed_t b);
+#endif
 fixed_t FixedDiv	(fixed_t a, fixed_t b);
 
 

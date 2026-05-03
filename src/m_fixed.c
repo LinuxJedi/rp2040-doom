@@ -31,6 +31,7 @@
 
 // Fixme. __USE_C_FIXED__ or something.
 
+#ifndef FIXED_MUL_INLINED
 fixed_t
 FixedMul
 ( fixed_t	a,
@@ -42,6 +43,7 @@ FixedMul
     return FixedMulInline(a,b);
 #endif
 }
+#endif
 
 
 
