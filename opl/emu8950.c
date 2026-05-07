@@ -1646,9 +1646,11 @@ uint32_t __not_in_flash_func(slot_car_linear_alg0)(OPL *opl, OPL_SLOT *slot, uin
         nsamples = nsamples_bak;
         // todo if note ends we can stop early
         for (; s < nsamples; s++) {
+#if DUMPO
             if (hack_ch == 0 && s == 12) {
                 breako();
             }
+#endif
             eg_counter++;
             pm_phase = (pm_phase + opl->pm_dphase) & (PM_DP_WIDTH - 1);
             uint16_t mask = (1 << slot->eg_shift) - 1;
@@ -1688,9 +1690,11 @@ uint32_t __not_in_flash_func(slot_car_linear_alg0)(OPL *opl, OPL_SLOT *slot, uin
     if (slot->eg_state == SUSTAIN || slot->eg_state == RELEASE) {
         nsamples = nsamples_bak;
         for (; s < nsamples; s++) {
+#if DUMPO
             if (hack_ch == 0 && s == 12) {
                 breako();
             }
+#endif
             eg_counter++;
             pm_phase = (pm_phase + opl->pm_dphase) & (PM_DP_WIDTH - 1);
             uint16_t mask = (1 << slot->eg_shift) - 1;
