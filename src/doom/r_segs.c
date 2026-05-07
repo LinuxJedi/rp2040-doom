@@ -115,23 +115,94 @@ short *maskedtexturecol;
 //
 // R_RenderMaskedSegRange
 //
-// Stubbed for the wolfDemo port: the upstream Chocolate Doom body relies
-// on direct field access (`curline->frontsector`, `curline->sidedef`,
-// `curline->linedef`, plus the upstream `texturetranslation` /
-// `textureheight` arrays and the upstream `R_GetColumn(int)` /
-// `R_DrawMaskedColumn(column_t*)` signatures) that are incompatible with
-// our SHRINK_MOBJ / USE_RAW_MAPSEG / WHD framedrawable accessors. The
-// drawseg silhouette work that R_DrawSprite needs (in r_things.c) is
-// independent of this function - silhouettes are stored by
-// R_StoreWallRange (further down in this file). Re-enabling this
-// function would let masked mid-textures render (door bars, fences);
-// currently those won't appear. Not on the critical path for Phase 7e.
+// Port of the upstream Chocolate Doom body (preserved in #if 0 below)
+// to the wolfDemo / WHD framedrawable surface. Each maskedtexturecol[]
+// entry left by R_StoreWallRange is converted to a R_DrawMaskedColumn
+// call, which enqueues into pd_add_masked_columns; the queue drains in
+// pd_end_frame -> drain_sprite_queues alongside sprites, preserving
+// drawseg ordering.
 void
 R_RenderMaskedSegRange
         (drawseg_t *ds,
          int x1,
          int x2) {
-    (void)ds; (void)x1; (void)x2;
+    unsigned index;
+    int lightnum;
+    int texnum;
+    framedrawable_t *masked_fd;
+
+    curline = ds->curline;
+    sector_t *fs = seg_frontsector(curline);
+    sector_t *bs = seg_backsector(curline);
+    side_t   *sd = seg_sidedef(curline);
+    line_t   *ld = seg_linedef(curline);
+
+    texnum    = texture_translation(side_midtexture(sd));
+    masked_fd = lookup_masked_texture(texnum);
+    if (!masked_fd) return;
+
+    lightnum = (fs->lightlevel >> LIGHTSEGSHIFT) + extralight;
+    if (vertex_y(seg_v1(curline)) == vertex_y(seg_v2(curline)))      lightnum--;
+    else if (vertex_x(seg_v1(curline)) == vertex_x(seg_v2(curline))) lightnum++;
+    if (lightnum < 0)                  walllights = scalelight[0];
+    else if (lightnum >= LIGHTLEVELS)  walllights = scalelight[LIGHTLEVELS - 1];
+    else                               walllights = scalelight[lightnum];
+
+    maskedtexturecol = ds->maskedtexturecol;
+    rw_scalestep = ds->scalestep;
+    spryscale    = ds->scale1 + (x1 - ds->x1) * rw_scalestep;
+    mfloorclip   = ds->sprbottomclip;
+    mceilingclip = ds->sprtopclip;
+
+    if (line_flags(ld) & ML_DONTPEGBOTTOM) {
+        dc_texturemid = fs->rawfloorheight > bs->rawfloorheight
+                        ? sector_floorheight(fs) : sector_floorheight(bs);
+        dc_texturemid = dc_texturemid + texture_height(texnum) - viewz;
+    } else {
+        dc_texturemid = fs->rawceilingheight < bs->rawceilingheight
+                        ? sector_ceilingheight(fs) : sector_ceilingheight(bs);
+        dc_texturemid = dc_texturemid - viewz;
+    }
+    dc_texturemid += side_rowoffset(sd);
+
+    if (fixedcolormap) {
+#if !NO_USE_DC_COLORMAP
+        dc_colormap = colormaps + fixedcolormap * 256;
+#else
+        dc_colormap_index = fixedcolormap;
+#endif
+    }
+
+    for (dc_x = x1; dc_x <= x2; dc_x++) {
+        if (maskedtexturecol[dc_x] != SHRT_MAX) {
+            if (!fixedcolormap) {
+                index = spryscale >> LIGHTSCALESHIFT;
+                if (index >= MAXLIGHTSCALE) index = MAXLIGHTSCALE - 1;
+#if !USE_LIGHTMAP_INDEXES
+                dc_colormap = walllights[index];
+#elif !NO_USE_DC_COLORMAP
+                dc_colormap = colormaps + walllights[index] * 256;
+#else
+                dc_colormap_index = walllights[index];
+#endif
+            }
+            sprtopscreen = centeryfrac - FixedMul(dc_texturemid, spryscale);
+            dc_iscale    = 0xffffffffu / (unsigned)spryscale;
+#if PD_SCALE_SORT
+            pd_scale = spryscale;
+#endif
+            /* maskedtexturecol[] is the raw texture x from R_RenderSegLoop
+             * and can exceed the texture / patch width. R_GetColumn
+             * masks for the texture (real_id >= 0) path, but the patch
+             * path in R_GetMaskedColumn doesn't, so we mask here. Doom
+             * texture widths are power-of-2, so & (width-1) is correct. */
+            uint8_t mcol = (uint8_t)(maskedtexturecol[dc_x] & (texture_width(texnum) - 1));
+            maskedcolumn_t col = R_GetMaskedColumn(masked_fd, mcol);
+            R_DrawMaskedColumn(col);
+            maskedtexturecol[dc_x] = SHRT_MAX;
+        }
+        spryscale += rw_scalestep;
+    }
 }
 #if 0
 void

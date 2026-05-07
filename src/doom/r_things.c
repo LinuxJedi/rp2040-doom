@@ -415,7 +415,11 @@ void R_DrawMaskedColumn(maskedcolumn_t column) {
     dc_texturemid = basetexturemid;
 #else
     if (column.real_id >= 0) {
-        panic_unsupported(); // handled earlier in r_segs.
+        /* Composite (multi-patch) masked midtexture - rare, e.g. E4M3
+         * in Ultimate Doom (see r_data_whd.c lookup_masked_texture).
+         * Not implemented for the wolfDemo port; soft-skip so the
+         * column stays invisible instead of panicking the board. */
+        return;
 //        topscreen = sprtopscreen;
 //        bottomscreen = topscreen + spryscale * column.height;
 //
