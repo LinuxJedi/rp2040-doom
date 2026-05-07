@@ -106,7 +106,7 @@ struct SLOT_RENDER {
     uint16_t efix_pg_phase_multiplier; /* ml_table[slot->patch->ML]) << slot->blk >> 1 */
     uint8_t blk;              /* block (3 bits) */
     uint32_t pg_phase;        /* pg phase */ // note this moves twice as fast in slot_render version
-#if EMU8950_SLOT_RENDER
+#if EMU8950_SLOT_RENDER || EMU8950_M33_PRECOMP
 //#if !PICO_ON_DEVICE
     uint32_t efix_pg_pm_x_fnum3ff; /* efix_pg_phase_multiplier * (fnum & 0x3ff) */
 //#endif

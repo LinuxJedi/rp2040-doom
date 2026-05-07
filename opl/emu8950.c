@@ -482,8 +482,35 @@ enum SLOT_UPDATE_FLAG
     UPDATE_TLL = 2,
     UPDATE_RKS = 4,
     UPDATE_EG = 8,
+#if EMU8950_M33_PRECOMP
+    /* wolfDemo: triggers recompute of efix_pg_phase_multiplier and
+     * efix_pg_pm_x_fnum3ff. Set whenever ML, fnum, or blk changes. */
+    UPDATE_PHASE = 16,
+#endif
     UPDATE_ALL = 255,
 };
+
+/* wolfDemo: per-sample phase increment. The precomputed form lifts
+ * the (fnum & 0x3ff) * ml_table[ML] << blk computation out of the
+ * inner loop (it changes only on register writes via UPDATE_PHASE,
+ * see commit_slot_update). pm is signed int8 - sign-extend before
+ * multiplying with the unsigned multiplier. */
+#if EMU8950_M33_PRECOMP
+#define UPDATE_PG_PHASE(slot, pm)                                           \
+    do {                                                                    \
+        (slot)->pg_phase += ((slot)->efix_pg_pm_x_fnum3ff +                 \
+                             (uint32_t)((int32_t)(pm) *                     \
+                              (int32_t)(slot)->efix_pg_phase_multiplier))   \
+                            >> 1;                                           \
+    } while (0)
+#else
+#define UPDATE_PG_PHASE(slot, pm)                                           \
+    do {                                                                    \
+        (slot)->pg_phase += ((((slot)->fnum & 0x3ff) + (pm)) *              \
+                             ml_table[(slot)->patch->ML])                   \
+                            << (slot)->blk >> 1;                            \
+    } while (0)
+#endif
 
 static INLINE void request_update(OPL_SLOT *slot, int flag) {
     slot->update_requests |= flag;
@@ -561,6 +588,24 @@ static void commit_slot_update(OPL_SLOT *slot, uint8_t notesel) {
             }
         }
     }
+
+#if EMU8950_M33_PRECOMP
+    /* wolfDemo: per-note phase precomputation. The slot loop expression
+     *   pg_phase += ((fnum&0x3ff) + pm) * ml_table[ML] << blk >> 1
+     * factors as
+     *   pg_phase += ((fnum&0x3ff) * efix_phase_mul + pm * efix_phase_mul) >> 1
+     * where efix_phase_mul = ml_table[ML] << blk. We keep the >> 1 in
+     * the per-sample expression rather than baking it into efix - if
+     * we lifted >> 1 here, ml_table[0] = 1 with blk = 0 would round
+     * to zero and silence the slot. */
+    if (slot->update_requests & UPDATE_PHASE) {
+        slot->efix_pg_phase_multiplier =
+            (uint16_t)(ml_table[slot->patch->ML] << slot->blk);
+        slot->efix_pg_pm_x_fnum3ff =
+            (uint32_t)slot->efix_pg_phase_multiplier *
+            (uint32_t)(slot->fnum & 0x3ff);
+    }
+#endif
 
 #if OPL_DEBUG
     if (slot->last_eg_state != slot->eg_state) {
@@ -709,8 +754,13 @@ static INLINE void set_fnumber(OPL *opl, int ch, int fnum) {
     car->blk_fnum = (car->blk_fnum & 0x1c00) | (fnum & 0x3ff);
     mod->fnum = fnum;
     mod->blk_fnum = (mod->blk_fnum & 0x1c00) | (fnum & 0x3ff);
+#if EMU8950_M33_PRECOMP
+    request_update(car, UPDATE_EG | UPDATE_RKS | UPDATE_TLL | UPDATE_PHASE);
+    request_update(mod, UPDATE_EG | UPDATE_RKS | UPDATE_TLL | UPDATE_PHASE);
+#else
     request_update(car, UPDATE_EG | UPDATE_RKS | UPDATE_TLL);
     request_update(mod, UPDATE_EG | UPDATE_RKS | UPDATE_TLL);
+#endif
 }
 
 /* set block data (blk : 3bit ) */
@@ -721,8 +771,13 @@ static INLINE void set_block(OPL *opl, int ch, int blk) {
     car->blk_fnum = ((blk & 7) << 10) | (car->blk_fnum & 0x3ff);
     mod->blk = blk;
     mod->blk_fnum = ((blk & 7) << 10) | (mod->blk_fnum & 0x3ff);
+#if EMU8950_M33_PRECOMP
+    request_update(car, UPDATE_EG | UPDATE_RKS | UPDATE_TLL | UPDATE_PHASE);
+    request_update(mod, UPDATE_EG | UPDATE_RKS | UPDATE_TLL | UPDATE_PHASE);
+#else
     request_update(car, UPDATE_EG | UPDATE_RKS | UPDATE_TLL);
     request_update(mod, UPDATE_EG | UPDATE_RKS | UPDATE_TLL);
+#endif
 }
 
 static INLINE void update_perc_mode(OPL *opl) {
@@ -824,7 +879,7 @@ static INLINE void calc_phase(OPL_SLOT *slot, int32_t pm_phase, uint8_t pm_mode,
     if (reset) {
         slot->pg_phase = 0;
     }
-    slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+    UPDATE_PG_PHASE(slot, pm);
     slot->pg_phase &= (DP_WIDTH - 1);
     slot->pg_out = slot->pg_phase >> DP_BASE_BITS;
 }
@@ -920,24 +975,52 @@ static void update_slots(OPL *opl) {
 
 #endif
 /* input: 0..8191 output: -4095..4095 */
-static int16_t lookup_exp_table(int16_t i) {
+#if EMU8950_M33_PRECOMP
+__attribute__((always_inline))
+#endif
+static INLINE int16_t lookup_exp_table(int16_t i) {
     /* from andete's expressoin */
     int16_t t = (exp_table[(i & 0xffu)] + 1024);
     int16_t res = t >> ((i & 0x7f00) >> 8);
 #if EMU8950_LINEAR_NEG_NOT_NOT
     return ((i & 0x8000) ? -res : res) << 1;
+#elif EMU8950_M33_PRECOMP
+    /* wolfDemo: branch-free sign handling. Sign-extend bit 15 of i to a
+     * full-width int32 mask (0xFFFFFFFF if negative, 0 otherwise). XOR
+     * with res produces ~res when the mask is all-ones, res when zero -
+     * the same value as `(i & 0x8000) ? ~res : res` but without the
+     * conditional branch. GCC lowers the (i << 16) >> 31 to sbfx on M33. */
+    int32_t sign_mask = ((int32_t)i << 16) >> 31;
+    return (int16_t)((res ^ (int16_t)sign_mask) << 1);
 #else
     return ((i & 0x8000) ? ~res : res) << 1;
 #endif
 }
 
+#if EMU8950_M33_PRECOMP
+__attribute__((always_inline))
+#endif
 static INLINE int16_t to_linear(uint16_t h, OPL_SLOT *slot, int16_t am) {
     uint16_t att;
     if (slot->eg_out >= EG_MAX) {
         return 0;
     }
 
+#if EMU8950_M33_PRECOMP
+    /* wolfDemo: usat clamps to [0, 0x1FF] = [0, EG_MUTE] in one cycle,
+     * replacing the compare + conditional move from min(). Inline asm
+     * keeps emu8950.c free of a CMSIS-header dependency. */
+    {
+        uint32_t _att_in = (uint32_t)((int32_t)slot->eg_out +
+                                      (int32_t)slot->tll +
+                                      (int32_t)am);
+        uint32_t _att_sat;
+        __asm volatile ("usat %0, #9, %1" : "=r"(_att_sat) : "r"(_att_in));
+        att = (uint16_t)(_att_sat << 3);
+    }
+#else
     att = min(EG_MUTE, (slot->eg_out + slot->tll + am)) << 3;
+#endif
     return lookup_exp_table(h + att);
 }
 
@@ -945,7 +1028,10 @@ static INLINE int16_t to_linear(uint16_t h, OPL_SLOT *slot, int16_t am) {
 #define LOGSIN_MASK2 (PG_WIDTH/2 - 1)
 
 //static INLINE uint16_t get_wave_table(OPL_SLOT *slot, uint32_t index) {
-static uint16_t get_wave_table(OPL_SLOT *slot, uint32_t index) {
+#if EMU8950_M33_PRECOMP
+__attribute__((always_inline))
+#endif
+static INLINE uint16_t get_wave_table(OPL_SLOT *slot, uint32_t index) {
 #if !EMU8950_NO_WAVE_TABLE_MAP
     return slot->wave_table[index];
 #else
@@ -980,6 +1066,9 @@ static uint16_t get_wave_table(OPL_SLOT *slot, uint32_t index) {
 #endif
 }
 
+#if EMU8950_M33_PRECOMP
+__attribute__((always_inline))
+#endif
 static INLINE uint16_t get_wave_table_wrap(OPL_SLOT *slot, uint32_t index) {
 #if !EMU8950_NO_WAVE_TABLE_MAP
     return get_wave_table(slot, index & (PG_WIDTH - 1));
@@ -1400,6 +1489,9 @@ uint32_t slot_car_linear_alg1(OPL *opl, OPL_SLOT *slot, uint32_t nsamples, uint3
 int hack_ch;
 #endif
 #if !EMU8950_SLOT_RENDER
+#if EMU8950_M33_PRECOMP
+__attribute__((hot))
+#endif
 uint32_t __not_in_flash_func(slot_mod_linear)(OPL *opl, OPL_SLOT *slot, uint32_t nsamples, uint32_t eg_counter, uint32_t pm_phase) {
     uint32_t s = 0;
     uint32_t nsamples_bak = nsamples;
@@ -1426,7 +1518,7 @@ uint32_t __not_in_flash_func(slot_mod_linear)(OPL *opl, OPL_SLOT *slot, uint32_t
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1462,7 +1554,7 @@ uint32_t __not_in_flash_func(slot_mod_linear)(OPL *opl, OPL_SLOT *slot, uint32_t
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1488,7 +1580,7 @@ uint32_t __not_in_flash_func(slot_mod_linear)(OPL *opl, OPL_SLOT *slot, uint32_t
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1502,6 +1594,9 @@ uint32_t __not_in_flash_func(slot_mod_linear)(OPL *opl, OPL_SLOT *slot, uint32_t
     return nsamples;
 }
 
+#if EMU8950_M33_PRECOMP
+__attribute__((hot))
+#endif
 uint32_t __not_in_flash_func(slot_car_linear_alg1)(OPL *opl, OPL_SLOT *slot, uint32_t nsamples, uint32_t eg_counter, uint32_t pm_phase) {
     uint32_t s = 0;
     uint32_t nsamples_bak = nsamples;
@@ -1528,7 +1623,7 @@ uint32_t __not_in_flash_func(slot_car_linear_alg1)(OPL *opl, OPL_SLOT *slot, uin
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1563,7 +1658,7 @@ uint32_t __not_in_flash_func(slot_car_linear_alg1)(OPL *opl, OPL_SLOT *slot, uin
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1588,7 +1683,7 @@ uint32_t __not_in_flash_func(slot_car_linear_alg1)(OPL *opl, OPL_SLOT *slot, uin
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1601,6 +1696,9 @@ uint32_t __not_in_flash_func(slot_car_linear_alg1)(OPL *opl, OPL_SLOT *slot, uin
     return nsamples;
 }
 
+#if EMU8950_M33_PRECOMP
+__attribute__((hot))
+#endif
 uint32_t __not_in_flash_func(slot_car_linear_alg0)(OPL *opl, OPL_SLOT *slot, uint32_t nsamples, uint32_t eg_counter, uint32_t pm_phase) {
     uint32_t s = 0;
     uint32_t nsamples_bak = nsamples;
@@ -1627,7 +1725,7 @@ uint32_t __not_in_flash_func(slot_car_linear_alg0)(OPL *opl, OPL_SLOT *slot, uin
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1672,7 +1770,7 @@ uint32_t __not_in_flash_func(slot_car_linear_alg0)(OPL *opl, OPL_SLOT *slot, uin
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
@@ -1707,7 +1805,7 @@ uint32_t __not_in_flash_func(slot_car_linear_alg0)(OPL *opl, OPL_SLOT *slot, uin
                 pm = pm_table[(slot->fnum >> 7) & 7][pm_phase >> (PM_DP_BITS - PM_PG_BITS)];
                 pm >>= (opl->pm_mode ? 0 : 1);
             }
-            slot->pg_phase += (((slot->fnum & 0x3ff) + pm) * ml_table[slot->patch->ML]) << slot->blk >> 1;
+            UPDATE_PG_PHASE(slot, pm);
             slot->pg_phase &= (DP_WIDTH - 1);
             uint32_t pg_out = slot->pg_phase >> DP_BASE_BITS;
 
