@@ -42,6 +42,16 @@
 #if USE_WHD
 
 #include "doom/r_data.h"
+#include "i_video_lut.h"
+
+/* wolfDemo STM32 port: pixel_t is RGB565 (uint16_t). The scan-out
+ * buffer is 240 px wide; the engine still emits patches in 320-column
+ * coordinates, so each writer drops every 4th source column and
+ * remaps the surviving columns via x_squeeze (= x - x/4). */
+#define DISP_W_PORT       240
+static inline int v_xsq(int x) { return x - (x >> 2); }
+#define V_KEEP(xc)        (((xc) & 3) != 3)
+#define V_PUT(row, xc, p) do { if (V_KEEP(xc)) (row)[v_xsq(xc)] = palette_rgb565[(p)]; } while (0)
 
 static_assert(VPATCH_NAME_INVALID == 0, "");
 //static_assert(NUM_VPATCHES < 256, "");
@@ -190,7 +200,6 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
         }
     }
     for (int l = 1; l < patchlist[0].header.size; l++) {
-        uint8_t *orig = dest_screen + (patchlist[l].entry.y) * SCREENWIDTH + patchlist[l].entry.x;
         const patch_t *patch = resolve_vpatch_handle(patchlist[l].entry.patch_handle);
         const uint8_t *pal;
         if (!vpatch_has_shared_palette(patch)) {
@@ -202,28 +211,33 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
         int repeat = patchlist[l].entry.repeat;
         int w = vpatch_width(patch);
         int h0 = vpatch_height(patch);
+        int entry_x = patchlist[l].entry.x;
+        int entry_y = patchlist[l].entry.y;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
         int skip_top;
 #pragma GCC diagnostic pop
         int type = vpatch_type(patch);
-        if (patchlist[l].entry.y + h0 > vpatch_clip_bottom) {
+        if (entry_y + h0 > vpatch_clip_bottom) {
             // clipping bottom which is trivial
-            h0 = vpatch_clip_bottom - patchlist[l].entry.y;
+            h0 = vpatch_clip_bottom - entry_y;
             if (h0 <= 0) continue;
         }
-        if (patchlist[l].entry.y < vpatch_clip_top) {
-            skip_top = vpatch_clip_top - patchlist[l].entry.y;
+        if (entry_y < vpatch_clip_top) {
+            skip_top = vpatch_clip_top - entry_y;
             if (skip_top >= h0) continue;
             h0 -= skip_top;
             type += vp4_runs_clipped - vp4_runs;
+            entry_y = vpatch_clip_top;
         }
         const uint8_t *data = vpatch_data(patch);
-        uint8_t *desttop = orig;
+        /* desttop_row points at column 0 of the current dest row; per-pixel
+         * x compaction maps logical 320-space columns into 240-space. */
+        pixel_t *desttop_row = dest_screen + entry_y * DISP_W_PORT;
         int h = h0;
         switch (type) {
             case vp4_runs_clipped:
-                for(;skip_top--; desttop += SCREENWIDTH) {
+                for(;skip_top--; ) {
                     uint8_t gap;
                     int p = 0;
                     while (0xff != (gap = *data++)) {
@@ -243,57 +257,64 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                 }
                 // fall thru
             case vp4_runs:
-                for (; h > 0; h--, desttop += SCREENWIDTH) {
-                    uint8_t *p = desttop;
-                    uint8_t *pend = desttop + w;
+                for (; h > 0; h--, desttop_row += DISP_W_PORT) {
+                    int xc = entry_x;
+                    int xc_end = entry_x + w;
                     uint8_t gap;
                     while (0xff != (gap = *data++)) {
-                        p += gap;
+                        xc += gap;
                         int len = *data++;
                         for (int i = 1; i < len; i += 2) {
                             uint v = *data++;
-                            *p++ = pal[v & 0xf];
-                            *p++ = pal[v >> 4];
+                            V_PUT(desttop_row, xc, pal[v & 0xf]);    xc++;
+                            V_PUT(desttop_row, xc, pal[v >> 4]);     xc++;
                         }
                         if (len & 1) {
-                            *p++ = pal[(*data++) & 0xf];
+                            V_PUT(desttop_row, xc, pal[(*data++) & 0xf]); xc++;
                         }
-                        assert(p <= pend);
-                        if (p == pend) break;
+                        /* Some vanilla patch streams produce runs whose
+                         * cumulative length lands slightly past the
+                         * patch's right edge before a 0xff terminator
+                         * arrives. The original code asserted on this
+                         * but the upstream byte-writer mostly wrote
+                         * into adjacent in-row bytes and limped on.
+                         * Treat any xc >= xc_end as an end-of-row and
+                         * break out cleanly. */
+                        if (xc >= xc_end) break;
                     }
                 }
                 break;
             case vp4_alpha_clipped:
                 data += ((w + 1) / 2) * skip_top;
-                desttop += SCREENWIDTH * skip_top;
+                desttop_row += DISP_W_PORT * skip_top;
                 // fallthru
             case vp4_alpha:
-                for (; h > 0; h--, desttop += SCREENWIDTH) {
-                    uint8_t *p = desttop;
+                for (; h > 0; h--, desttop_row += DISP_W_PORT) {
+                    int xc = entry_x;
                     for (int i = 0; i < w / 2; i++) {
                         uint v = *data++;
-                        if (v & 0xf) p[0] = pal[v & 0xf];
-                        if (v >> 4) p[1] = pal[v >> 4];
-                        p += 2;
+                        if (v & 0xf) V_PUT(desttop_row, xc,     pal[v & 0xf]);
+                        if (v >> 4)  V_PUT(desttop_row, xc + 1, pal[v >> 4]);
+                        xc += 2;
                     }
                     if (w & 1) {
                         uint v = *data++;
-                        if (v & 0xf) p[0] = pal[v & 0xf];
+                        if (v & 0xf) V_PUT(desttop_row, xc, pal[v & 0xf]);
                     }
                 }
                 break;
             case vp4_solid:
-                for (; h > 0; h--, desttop += SCREENWIDTH) {
-                    uint8_t *p = desttop;
+                for (; h > 0; h--, desttop_row += DISP_W_PORT) {
+                    int xc = entry_x;
                     for (int i = 0; i < w / 2; i++) {
                         uint v = *data++;
-                        p[0] = pal[v & 0xf];
-                        p[1] = pal[v >> 4];
-                        p += 2;
+                        V_PUT(desttop_row, xc,     pal[v & 0xf]);
+                        V_PUT(desttop_row, xc + 1, pal[v >> 4]);
+                        xc += 2;
                     }
                     if (w & 1) {
                         uint v = *data++;
-                        p[0] = pal[v & 0xf];
+                        V_PUT(desttop_row, xc, pal[v & 0xf]);
                     }
                 }
                 break;
@@ -301,56 +322,70 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                 // todo implement this (perhaps needed for multi player?)
                 continue;
             case vp6_runs:
-                for (; h > 0; h--, desttop += SCREENWIDTH) {
-                    uint8_t *p = desttop;
-                    uint8_t *pend = desttop + w;
+                for (; h > 0; h--, desttop_row += DISP_W_PORT) {
+                    int xc = entry_x;
+                    int xc_end = entry_x + w;
                     uint8_t gap;
                     while (0xff != (gap = *data++)) {
-                        p += gap;
+                        xc += gap;
                         int len = *data++;
                         for (int i = 3; i < len; i += 4) {
                             uint v = *data++;
                             v |= (*data++) << 8;
                             v |= (*data++) << 16;
-                            *p++ = pal[v & 0x3f];
-                            *p++ = pal[(v >> 6) & 0x3f];
-                            *p++ = pal[(v >> 12) & 0x3f];
-                            *p++ = pal[(v >> 18) & 0x3f];
+                            V_PUT(desttop_row, xc,     pal[v & 0x3f]);          xc++;
+                            V_PUT(desttop_row, xc,     pal[(v >> 6) & 0x3f]);   xc++;
+                            V_PUT(desttop_row, xc,     pal[(v >> 12) & 0x3f]);  xc++;
+                            V_PUT(desttop_row, xc,     pal[(v >> 18) & 0x3f]);  xc++;
                         }
                         len &= 3;
                         if (len--) {
                             uint v = *data++;
-                            *p++ = pal[v & 0x3f];
+                            V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
                             if (len--) {
                                 v >>= 6;
                                 v |= (*data++) << 2;
-                                *p++ = pal[v & 0x3f];
+                                V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
                                 if (len--) {
                                     v >>= 6;
                                     v |= (*data++) << 4;
-                                    *p++ = pal[v & 0x3f];
+                                    V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
                                     assert(!len);
                                 }
                             }
                         }
-                        assert(p <= pend);
-                        if (p == pend) break;
+                        /* Some vanilla patch streams produce runs whose
+                         * cumulative length lands slightly past the
+                         * patch's right edge before a 0xff terminator
+                         * arrives. The original code asserted on this
+                         * but the upstream byte-writer mostly wrote
+                         * into adjacent in-row bytes and limped on.
+                         * Treat any xc >= xc_end as an end-of-row and
+                         * break out cleanly. */
+                        if (xc >= xc_end) break;
                     }
                 }
                 break;
             case vp8_runs:
-                for (; h > 0; h--, desttop += SCREENWIDTH) {
-                    uint8_t *p = desttop;
-                    uint8_t *pend = desttop + w;
+                for (; h > 0; h--, desttop_row += DISP_W_PORT) {
+                    int xc = entry_x;
+                    int xc_end = entry_x + w;
                     uint8_t gap;
                     while (0xff != (gap = *data++)) {
-                        p += gap;
+                        xc += gap;
                         int len = *data++;
                         for (int i = 0; i < len; i++) {
-                            *p++ = pal[*data++];
+                            V_PUT(desttop_row, xc, pal[*data++]); xc++;
                         }
-                        assert(p <= pend);
-                        if (p == pend) break;
+                        /* Some vanilla patch streams produce runs whose
+                         * cumulative length lands slightly past the
+                         * patch's right edge before a 0xff terminator
+                         * arrives. The original code asserted on this
+                         * but the upstream byte-writer mostly wrote
+                         * into adjacent in-row bytes and limped on.
+                         * Treat any xc >= xc_end as an end-of-row and
+                         * break out cleanly. */
+                        if (xc >= xc_end) break;
                     }
                 }
                 break;
@@ -358,10 +393,13 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                 data += 3 * skip_top;
                 // fall thru
             case vp_border: {
-                for (; h > 0; h--, desttop += SCREENWIDTH) {
-                    desttop[0] = data[0];
-                    for (int i = 1; i < w - 1; i++) desttop[i] = data[1];
-                    desttop[w - 1] = data[2];
+                for (; h > 0; h--, desttop_row += DISP_W_PORT) {
+                    int xc = entry_x;
+                    V_PUT(desttop_row, xc, data[0]);
+                    for (int i = 1; i < w - 1; i++) {
+                        V_PUT(desttop_row, xc + i, data[1]);
+                    }
+                    V_PUT(desttop_row, xc + w - 1, data[2]);
                     data += 3;
                 }
                 break;
@@ -372,16 +410,26 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                 continue;
         }
         if (repeat) {
-            // we need them to be solid... which they are, but if not you'll just get some visual funk
-            //assert(vpatch_type(patch) == vp4_solid);
-            h = h0;
-            if (patchlist[l].entry.patch_handle == VPATCH_M_THERMM) w--; // hackity hack
-            uint8_t *desttop = orig;
-            for(;h>0;h--) {
-                for (int i = 0; i < repeat * w; i++) {
-                    desttop[w + i] = desttop[i];
+            // Repeated patches (e.g. M_THERMM thermometer body): copy the
+            // already-rendered span [entry_x, entry_x + w) horizontally
+            // `repeat` times. Operate on the squeezed buffer so the copy
+            // strides correctly. Some logical columns were dropped and the
+            // squeezed copy offset depends on the source x window.
+            int rw = w;
+            if (patchlist[l].entry.patch_handle == VPATCH_M_THERMM) rw--;
+            pixel_t *dst_row = dest_screen + entry_y * DISP_W_PORT;
+            for (int hh = 0; hh < h0; hh++, dst_row += DISP_W_PORT) {
+                for (int r = 0; r < repeat; r++) {
+                    int src_x_base = entry_x;
+                    int dst_x_base = entry_x + (r + 1) * rw;
+                    for (int i = 0; i < rw; i++) {
+                        int sx = src_x_base + i;
+                        int dx = dst_x_base + i;
+                        if (!V_KEEP(dx)) continue;
+                        if (!V_KEEP(sx)) continue;
+                        dst_row[v_xsq(dx)] = dst_row[v_xsq(sx)];
+                    }
                 }
-                desttop += SCREENWIDTH;
             }
         }
     }

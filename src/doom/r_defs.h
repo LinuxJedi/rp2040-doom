@@ -404,12 +404,10 @@ typedef const whdnode_t node_t;
 // OTHER TYPES
 //
 
-// This could be wider for >8 bit display.
-// Indeed, true color support is posibble
-//  precalculating 24bpp lightmap/colormap LUT.
-//  from darkening PLAYPAL to all black.
-// Could even us emore than 32 levels.
-typedef pixel_t		lighttable_t;
+// wolfDemo STM32 port: pixel_t went to uint16_t for direct RGB565
+// writes. Colormaps remain palette-indexed (uint8_t) and a 33x256
+// uint16_t lit_lut composes colormap+palette at write time.
+typedef uint8_t		lighttable_t;
 
 
 

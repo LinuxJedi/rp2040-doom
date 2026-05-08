@@ -119,7 +119,11 @@ typedef uint8_t boolean;
 #endif
 
 typedef uint8_t byte;
-typedef uint8_t pixel_t;
+/* wolfDemo STM32 port: framebuffer is RGB565. Column drawers write
+ * uint16_t pixels via a precomputed lit_lut to scan_full_buf and the
+ * panel DMA picks them up in MSB-first byte order. lighttable_t stays
+ * uint8_t (palette-indexed colormap) - see r_defs.h. */
+typedef uint16_t pixel_t;
 typedef int16_t dpixel_t;
 
 #if !DOOM_SMALL
