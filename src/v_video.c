@@ -257,6 +257,17 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                 }
                 // fall thru
             case vp4_runs:
+                /* Some encoded rows overshoot ph.width before a 0xff
+                 * row terminator arrives. The upstream 8-bit decoder
+                 * "limped on" by writing the overshoot pixels into
+                 * adjacent in-row bytes; it relied on the natural 0xff
+                 * read to keep the data stream aligned for the next
+                 * row. We mimic that here: bound each V_PUT by xc <
+                 * xc_end and never break early on overshoot. The break
+                 * fires only when xc lands exactly on xc_end, which
+                 * the encoder uses to mean "row fully filled, no 0xff
+                 * terminator emitted" - same condition the upstream
+                 * `if (p == pend) break;` matched. */
                 for (; h > 0; h--, desttop_row += DISP_W_PORT) {
                     int xc = entry_x;
                     int xc_end = entry_x + w;
@@ -266,21 +277,17 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                         int len = *data++;
                         for (int i = 1; i < len; i += 2) {
                             uint v = *data++;
-                            V_PUT(desttop_row, xc, pal[v & 0xf]);    xc++;
-                            V_PUT(desttop_row, xc, pal[v >> 4]);     xc++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc, pal[v & 0xf]);
+                            xc++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc, pal[v >> 4]);
+                            xc++;
                         }
                         if (len & 1) {
-                            V_PUT(desttop_row, xc, pal[(*data++) & 0xf]); xc++;
+                            uint v = (*data++) & 0xf;
+                            if (xc < xc_end) V_PUT(desttop_row, xc, pal[v]);
+                            xc++;
                         }
-                        /* Some vanilla patch streams produce runs whose
-                         * cumulative length lands slightly past the
-                         * patch's right edge before a 0xff terminator
-                         * arrives. The original code asserted on this
-                         * but the upstream byte-writer mostly wrote
-                         * into adjacent in-row bytes and limped on.
-                         * Treat any xc >= xc_end as an end-of-row and
-                         * break out cleanly. */
-                        if (xc >= xc_end) break;
+                        if (xc == xc_end) break;
                     }
                 }
                 break;
@@ -322,6 +329,7 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                 // todo implement this (perhaps needed for multi player?)
                 continue;
             case vp6_runs:
+                /* See vp4_runs above for the row-end policy rationale. */
                 for (; h > 0; h--, desttop_row += DISP_W_PORT) {
                     int xc = entry_x;
                     int xc_end = entry_x + w;
@@ -333,40 +341,33 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                             uint v = *data++;
                             v |= (*data++) << 8;
                             v |= (*data++) << 16;
-                            V_PUT(desttop_row, xc,     pal[v & 0x3f]);          xc++;
-                            V_PUT(desttop_row, xc,     pal[(v >> 6) & 0x3f]);   xc++;
-                            V_PUT(desttop_row, xc,     pal[(v >> 12) & 0x3f]);  xc++;
-                            V_PUT(desttop_row, xc,     pal[(v >> 18) & 0x3f]);  xc++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc,     pal[v & 0x3f]);          xc++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc,     pal[(v >> 6) & 0x3f]);   xc++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc,     pal[(v >> 12) & 0x3f]);  xc++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc,     pal[(v >> 18) & 0x3f]);  xc++;
                         }
                         len &= 3;
                         if (len--) {
                             uint v = *data++;
-                            V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
                             if (len--) {
                                 v >>= 6;
                                 v |= (*data++) << 2;
-                                V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
+                                if (xc < xc_end) V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
                                 if (len--) {
                                     v >>= 6;
                                     v |= (*data++) << 4;
-                                    V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
+                                    if (xc < xc_end) V_PUT(desttop_row, xc, pal[v & 0x3f]); xc++;
                                     assert(!len);
                                 }
                             }
                         }
-                        /* Some vanilla patch streams produce runs whose
-                         * cumulative length lands slightly past the
-                         * patch's right edge before a 0xff terminator
-                         * arrives. The original code asserted on this
-                         * but the upstream byte-writer mostly wrote
-                         * into adjacent in-row bytes and limped on.
-                         * Treat any xc >= xc_end as an end-of-row and
-                         * break out cleanly. */
-                        if (xc >= xc_end) break;
+                        if (xc == xc_end) break;
                     }
                 }
                 break;
             case vp8_runs:
+                /* See vp4_runs above for the row-end policy rationale. */
                 for (; h > 0; h--, desttop_row += DISP_W_PORT) {
                     int xc = entry_x;
                     int xc_end = entry_x + w;
@@ -375,17 +376,11 @@ void V_DrawPatchList(const vpatchlist_t *patchlist) {
                         xc += gap;
                         int len = *data++;
                         for (int i = 0; i < len; i++) {
-                            V_PUT(desttop_row, xc, pal[*data++]); xc++;
+                            uint8_t pi = *data++;
+                            if (xc < xc_end) V_PUT(desttop_row, xc, pal[pi]);
+                            xc++;
                         }
-                        /* Some vanilla patch streams produce runs whose
-                         * cumulative length lands slightly past the
-                         * patch's right edge before a 0xff terminator
-                         * arrives. The original code asserted on this
-                         * but the upstream byte-writer mostly wrote
-                         * into adjacent in-row bytes and limped on.
-                         * Treat any xc >= xc_end as an end-of-row and
-                         * break out cleanly. */
-                        if (xc >= xc_end) break;
+                        if (xc == xc_end) break;
                     }
                 }
                 break;
