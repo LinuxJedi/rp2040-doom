@@ -45,6 +45,8 @@
 #if USE_WHD
 #include "p_spec.h"
 #endif
+
+#include "perf.h"
 // Fineangles in the SCREENWIDTH wide window.
 #define FIELDOFVIEW        2048
 #if MU_STATS
@@ -1210,7 +1212,13 @@ void R_RenderPlayerView(player_t *player) {
 #endif
 
     node_coord_t bbox[4] = { 32767, -32768, -32768, 32767 };
+#if PERF_INSTRUMENT
+    uint32_t perf_t = perf_cyc();
+#endif
     R_RenderBSPNode(numnodes -1, bbox);
+#if PERF_INSTRUMENT
+    perf_bsp_us += perf_us_since(perf_t);
+#endif
 #endif
 #if PICO_ON_DEVICE
 //    gpio_put(22, 0);
