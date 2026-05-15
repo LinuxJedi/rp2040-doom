@@ -209,11 +209,24 @@ void OPL_Queue_AdjustCallbacks(opl_callback_queue_t *queue,
     int64_t offset;
     int i;
 
-    float factor = old_tempo / new_tempo;
+    if (old_tempo == 0 || new_tempo == 0)
+    {
+        return;
+    }
+
     for (i = 0; i < queue->num_entries; ++i)
     {
         offset = queue->entries[i].time - time;
-        queue->entries[i].time = time + (uint64_t) (offset / factor);
+        if (offset >= 0)
+        {
+            queue->entries[i].time =
+                time + ((uint64_t) offset * new_tempo) / old_tempo;
+        }
+        else
+        {
+            queue->entries[i].time =
+                time - ((uint64_t) -offset * new_tempo) / old_tempo;
+        }
     }
 }
 
@@ -285,4 +298,3 @@ int main()
 }
 
 #endif
-

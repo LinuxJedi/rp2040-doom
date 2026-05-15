@@ -1283,7 +1283,7 @@ int whd_line_special(should_be_const line_t *line) {
 #else
     int rc = 0;
     if ((line[1] & (ML_HAS_SPECIAL >> 8)) != 0) {
-        const static uint8_t special_pos[8] = { 5, 6, 6, 7, 6, 7, 7, 8 };
+        static const uint8_t special_pos[8] = { 5, 6, 6, 7, 6, 7, 7, 8 };
         uint pos = special_pos[line[1]&7];
         rc = line[pos];
         uint index = line_bitmap_index(line - lines);
@@ -1308,7 +1308,7 @@ int line_special(should_be_const line_t *line) {
 #else
     int rc = 0;
     if ((line[1] & (ML_HAS_SPECIAL >> 8)) != 0) {
-        const static uint8_t special_pos[8] = { 5, 6, 6, 7, 6, 7, 7, 8 };
+        static const uint8_t special_pos[8] = { 5, 6, 6, 7, 6, 7, 7, 8 };
         uint pos = special_pos[line[1]&7];
         rc = line[pos];
         uint index = line_bitmap_index(line - lines);

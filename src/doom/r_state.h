@@ -413,7 +413,7 @@ static inline vertex_t *line_v1(const line_t *l) {
 }
 
 static inline vertex_t *line_v2(const line_t *l) {
-    const static uint8_t v2pos[4] = { 4, 5, 5, 6 };
+    static const uint8_t v2pos[4] = { 4, 5, 5, 6 };
     uint pos = v2pos[l[1]&3];
     int v;
     if (line_predict_v2(l)) {
@@ -428,7 +428,7 @@ static inline vertex_t *line_v2(const line_t *l) {
 static inline int line_tag(const line_t *l) {
     int tag = 0;
     if ((l[1] & (ML_HAS_TAG >> 8)) != 0) {
-        const static uint8_t special_pos[8] = { 5, 6, 6, 7, 6, 7, 7, 8 };
+        static const uint8_t special_pos[8] = { 5, 6, 6, 7, 6, 7, 7, 8 };
         uint pos = special_pos[l[1]&7] + ((l[1] & (ML_HAS_SPECIAL >> 8)) != 0);
         tag = l[pos];
     }
